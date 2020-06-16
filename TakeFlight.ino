@@ -3,7 +3,8 @@
  *  4x XXD HW30A ESC
  *  4x RacerStar BR2212 1000KV Brushless Motor
  *  1x LiPo Battery (11.1V @ 2200mah)
- *  1X Arduino Uno
+ *  1x Arduino Uno
+ *  1x Xpower 2200mah Battery
  */
 
 #include <Servo.h>
@@ -19,7 +20,8 @@ LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
 int analogPin = 0;
 float ADC_Voltage; // ADC allows for a maximum of 5V to be read as a 10 Bit number. 
 float Calculated_Voltage, Vin;
-float LowestVoltage = 3*3.5; // 3s battery, lowest voltage per cell is 3.5
+float Lowest_Voltage = 3*3.5; // 3s battery, lowest voltage per cell is 3.5
+float Nominal_Voltage = 11.1;
 float Diode_Volt_Drop = 0.70;
 
 // Servo Objects
@@ -36,7 +38,8 @@ int throttle;
 // Gyro & Accel Variables
 const int MPU_Address = 0x68;
 int16_t AccelX_Raw, AccelY_Raw, AccelZ_Raw, GyroX_Raw, GyroY_Raw, GyroZ_Raw; // 16-bit variable required to store output of MPU-6050
-float Accel_Angle[3], Gyro_Angle[3], Total_Angle[3]; // Arrays to store X,Y & Z data from the device. 
+float Accel_Angle[3], Gyro_Angle[3], Coupled_Roll_Angle, Coupled_Pitch_Angle, Total_Angle[3]; // Arrays to store X,Y & Z data from the device. 
+int Refresh_Rate = 250;
 
 // PID Variables
 int desired_angle = 0;
@@ -95,7 +98,7 @@ void loop() {
     Calculated_Voltage = (ADC_Voltage * 0.0049) + (Diode_Volt_Drop) - 0.4; // 1 unit in ADC = 0.0049 V
     Vin = Calculated_Voltage*((1000+2000)/1000); // Solve voltage divider equation with resistor values used in the circuit. 
     lcd.print(String("Cell Volts:") + String(Vin));
-    if(Vin < LowestVoltage) {
+    if(Vin < Lowest_Voltage) {
       lcd.setBacklight(HIGH);
       lcd.setCursor(0,1);
       lcd.print(String("Dead Battery!"));
@@ -115,9 +118,9 @@ void loop() {
   AccelY_Raw =  Wire.read()<<8 | Wire.read();
   AccelZ_Raw =  Wire.read()<<8 | Wire.read(); //Division by 16384 to convert reading to g.
 
-  Accel_Angle[0] = 180*atan((AccelY_Raw/16384.0)/(sqrt(pow(AccelX_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI;    // Roll Measurement From Accelerometer
-  Accel_Angle[1] = 180*atan((AccelX_Raw/16384.0)/(sqrt(pow(AccelY_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Pitch Measurement From Accelerometer
-  Accel_Angle[2] = 180*atan((AccelZ_Raw/16384.0)/(sqrt(pow(AccelX_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Yaw measurement From Accelerometer
+  // Reference: https://engineering.stackexchange.com/questions/3348/calculating-pitch-yaw-and-roll-from-mag-acc-and-gyro-data
+  Accel_Angle[0] = 180*atan((AccelY_Raw/16384.0)/(sqrt(pow(AccelX_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Roll Measurement From Accelerometer(Degrees)
+  Accel_Angle[1] = 180*atan((AccelX_Raw/16384.0)/(sqrt(pow(AccelY_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Pitch Measurement From Accelerometer(Degrees)
 
   // Read in the gyroscope data:
   Wire.beginTransmission(MPU_Address);
@@ -128,13 +131,18 @@ void loop() {
   GyroY_Raw = Wire.read()<<8 | Wire.read();
   GyroZ_Raw = Wire.read()<<8 | Wire.read();
 
-  Gyro_Angle[0] = GyroX_Raw/131; // Default LSB Sensitivity = 131. --------> This converts the gyro's output from degrees per second to degrees.
-  Gyro_Angle[1] = GyroY_Raw/131;
-  Gyro_Angle[2] = GyroZ_Raw/131;
+  Gyro_Angle[0] += GyroX_Raw/Refresh_Rate/131; // Integrate gyro readings
+  Gyro_Angle[1] += GyroY_Raw/Refresh_Rate/131;
+  Gyro_Angle[2] += (GyroZ_Raw)/(float)Refresh_Rate/((float)131);
 
+  // Reference: MPU-6050 6dof IMU tutorial for auto-leveling quadcopters with Arduino source code - Joop Brokking.
+  Gyro_Angle[0] -= Gyro_Angle[1] * sin(Gyro_Angle[2]*(M_PI/180));  // Couple gyro readings.
+  Gyro_Angle[1] += Gyro_Angle[0] * sin(Gyro_Angle[2]*(M_PI/180));
+  
   // Combine Sensors Data:
-  Total_Angle[0] = 0.98*(Total_Angle[0] + Gyro_Angle[0]*Elapsed_Time) + 0.02*(Accel_Angle[0]);
-  Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]*Elapsed_Time) + 0.02*(Accel_Angle[1]);
+  Total_Angle[0] = 0.98*(Total_Angle[0] + Gyro_Angle[0]) + 0.02*(Accel_Angle[0]);
+  Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]) + 0.02*(Accel_Angle[1]);
+  Total_Angle[2] = Gyro_Angle[2];
 
   // Scale Receiver Outputs For Faster Roll, Pitch & Yaw Rates
   Roll_Setpoint = 0; 
@@ -159,10 +167,10 @@ void loop() {
   esc_3 = throttle - PID_ROLL + PID_YAW - PID_PITCH;
   esc_4 = throttle - PID_ROLL - PID_YAW + PID_PITCH;
 
-  //esc_1 += esc_1*(11.6 - Vin)/10; // Compensate motors for reducing battery voltage.
- // esc_2 += esc_2*(11.6 - Vin)/10;
- // esc_3 += esc_3*(11.6 - Vin)/10;
- // esc_4 += esc_4*(11.6 - Vin)/10;
+  esc_1 += esc_1*(Nominal_Voltage - Vin)/10; // Compensate motors for reducing battery voltage.
+  esc_2 += esc_2*(Nominal_Voltage - Vin)/10;
+  esc_3 += esc_3*(Nominal_Voltage - Vin)/10;
+  esc_4 += esc_4*(Nominal_Voltage - Vin)/10;
 
   if(esc_1 < 1000) esc_1 = 1200; // Lower limit set to prevent motors from turning off
   if(esc_1 > 2000) esc_1 = 2000;
@@ -181,11 +189,11 @@ void loop() {
   //M3.writeMicroseconds(esc_3);
   //M4.writeMicroseconds(esc_4);
    
-  if((micros() - Loop_Timer_Start) > 4050)Serial.println("Over 4ms!");
+  //if((micros() - Loop_Timer_Start) > 4050)Serial.println("Over 4ms!");
 } // End of Void Loop  
 
 void initTransmitter() {
-   PCICR |= (1<<PCIE0); // Enable Interupts
+   PCICR  |= (1<<PCIE0); // Enable Interupts
    PCMSK0 |= (1<<PCINT0); // Arduino Pin 8 triggers interupt on state change.
    PCMSK0 |= (1<<PCINT1); // Arduino Pin 9 ""                               ""
    PCMSK0 |= (1<<PCINT2); // Arduino Pin 10 ""                              ""
@@ -200,7 +208,6 @@ void initMotors() {
 }
 
 ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can then be used to control the ESC's. 
-  //Current_Time = micros();
   // Channel 1
   if((last_val1 == 0) && (PINB & B00000001)) { // && is logical AND while & is bitwise &. The second bracket checks channel 1 on Port B for input. 
     last_val1 = 1;
