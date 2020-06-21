@@ -19,7 +19,8 @@ LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
 
 int analogPin = 0;
 float ADC_Voltage; // ADC allows for a maximum of 5V to be read as a 10 Bit number. 
-float Calculated_Voltage, Vin;
+float Calculated_Voltage = 0;
+float Vin = 0;
 float Lowest_Voltage = 3*3.5; // 3s battery, lowest voltage per cell is 3.5
 float Nominal_Voltage = 11.1;
 float Diode_Volt_Drop = 0.70;
@@ -28,6 +29,7 @@ float Diode_Volt_Drop = 0.70;
 float time, timePrev, Elapsed_Time;
 Servo M1,M2,M3,M4;
 int esc_1, esc_2, esc_3, esc_4;
+bool Start, Stop;
 
 // Tx & Rx Variables
 byte last_val1, last_val2, last_val3, last_val4;
@@ -39,7 +41,9 @@ int throttle;
 const int MPU_Address = 0x68;
 int16_t AccelX_Raw, AccelY_Raw, AccelZ_Raw, GyroX_Raw, GyroY_Raw, GyroZ_Raw; // 16-bit variable required to store output of MPU-6050
 float Accel_Angle[3], Gyro_Angle[3], Coupled_Roll_Angle, Coupled_Pitch_Angle, Total_Angle[3]; // Arrays to store X,Y & Z data from the device. 
-int Refresh_Rate = 250;
+float Accel_X_Offset, Accel_Y_Offset, Accel_Z_Offset, Gyro_X_Offset, Gyro_Y_Offset, Gyro_Z_Offset;
+float Refresh_Rate = 0.004; // 4ms Refresh Rate
+bool Calibration_Complete = false; 
 
 // PID Variables
 int desired_angle = 0;
@@ -65,34 +69,66 @@ unsigned long Loop_Timer_Start;
 
 void setup() {
   // put your setup code here, to run once:
+    Serial.begin(9600);
+    Wire.begin();                                                             //Start the I2C as master.
+    TWBR = 12;                                                                //Set the I2C clock speed to 400kHz.
     
     initTransmitter();
     initMotors();
     
-    Wire.begin();
     Wire.beginTransmission(MPU_Address);
     Wire.write(0x6B); // Move pointer to the Power Management Register
     Wire.write(0);
-    Wire.endTransmission(true); // Keep default scaling on Accelerometer and Gyroscope -> 1g = 16384 units.
+    Wire.endTransmission(true); 
 
-    lcd.begin(16,2);
-    lcd.clear();
-    lcd.setBacklight(LOW);
+    Wire.beginTransmission(MPU_Address);                                    
+    Wire.write(0x1B);                                                          
+    Wire.write(0x08);                                                          //Set 500dps full scale i.e 65.5 deg/sec
+    Wire.endTransmission();       
+
+    // Calibrate Gyroscope & Accelerometer To Eliminate Zero Bias Drift
+    for(int cal = 0; cal < 2000; cal++){
+      Read_IMU();
+      Accel_X_Offset += AccelX_Raw;
+      Accel_Y_Offset += AccelY_Raw;
+ 
+      Gyro_X_Offset  += GyroX_Raw;
+      Gyro_Y_Offset  += GyroY_Raw;
+      Gyro_Z_Offset  += GyroZ_Raw;
+    }
+    Accel_X_Offset /= 2000;
+    Accel_Y_Offset /= 2000;
     
-    Serial.begin(9600);
+    Gyro_X_Offset  /= 2000;
+    Gyro_Y_Offset  /= 2000;
+    Gyro_Z_Offset  /= 2000;
+    Calibration_Complete = true;
+        
     time = millis(); // Start the timer.
+    
+    M1.writeMicroseconds(2000);
+    M2.writeMicroseconds(2000);
+    M3.writeMicroseconds(2000);
+    M4.writeMicroseconds(2000);
+    delayMicroseconds(15000);
+    
     M1.writeMicroseconds(1000);
     M2.writeMicroseconds(1000);
     M3.writeMicroseconds(1000);
     M4.writeMicroseconds(1000);
-    delayMicroseconds(10000); 
-    Serial.println("Setup Complete.");
+    delayMicroseconds(15000); 
+
+    lcd.begin(16,2);
+    lcd.clear();
+    lcd.print("Setup Complete.");
+    delay(3000);
+    lcd.setBacklight(LOW);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  Loop_Timer_Start = micros(); // Start the timer for measuring the refresh rate.
-  if(((int)time % 1000) == 0){
+  Loop_Timer_Start = millis(); // Start the timer for measuring the refresh rate.
+  if((Loop_Timer_Start % 1000) == 0){
     lcd.clear();
     ADC_Voltage = analogRead(analogPin);
     Calculated_Voltage = (ADC_Voltage * 0.0049) + (Diode_Volt_Drop) - 0.4; // 1 unit in ADC = 0.0049 V
@@ -104,46 +140,27 @@ void loop() {
       lcd.print(String("Dead Battery!"));
     }
   }
-  
-  timePrev = time;
-  time = millis();
-  Elapsed_Time = (time - timePrev)/1000;
 
-  // Read in the accelerometer data:
-  Wire.beginTransmission(MPU_Address);
-  Wire.write(0x3B); // Move pointer to the first output register of the IMU device.
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_Address, 6, true);
-  AccelX_Raw =  Wire.read()<<8 | Wire.read(); // Read & combine register values using bit-shifting. Bit-shifting allows the fist bit to be set as high and the second bit to be set as low.  
-  AccelY_Raw =  Wire.read()<<8 | Wire.read();
-  AccelZ_Raw =  Wire.read()<<8 | Wire.read(); //Division by 16384 to convert reading to g.
-
+  // Read in IMU data:
+  Read_IMU();
+ 
   // Reference: https://engineering.stackexchange.com/questions/3348/calculating-pitch-yaw-and-roll-from-mag-acc-and-gyro-data
   Accel_Angle[0] = 180*atan((AccelY_Raw/16384.0)/(sqrt(pow(AccelX_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Roll Measurement From Accelerometer(Degrees)
   Accel_Angle[1] = 180*atan((AccelX_Raw/16384.0)/(sqrt(pow(AccelY_Raw/16384.0,2)+pow(AccelZ_Raw/16384.0,2))))/M_PI; // Pitch Measurement From Accelerometer(Degrees)
 
-  // Read in the gyroscope data:
-  Wire.beginTransmission(MPU_Address);
-  Wire.write(0x43);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_Address, 6, true);
-  GyroX_Raw = Wire.read()<<8 | Wire.read();
-  GyroY_Raw = Wire.read()<<8 | Wire.read();
-  GyroZ_Raw = Wire.read()<<8 | Wire.read();
-
-  Gyro_Angle[0] += GyroX_Raw/Refresh_Rate/131; // Integrate gyro readings
-  Gyro_Angle[1] += GyroY_Raw/Refresh_Rate/131;
-  Gyro_Angle[2] += (GyroZ_Raw)/(float)Refresh_Rate/((float)131);
+  Gyro_Angle[0] = GyroX_Raw/65.5; 
+  Gyro_Angle[1] = GyroY_Raw/65.5;
+  Gyro_Angle[2] = GyroZ_Raw/65.5;
 
   // Reference: MPU-6050 6dof IMU tutorial for auto-leveling quadcopters with Arduino source code - Joop Brokking.
   Gyro_Angle[0] -= Gyro_Angle[1] * sin(Gyro_Angle[2]*(M_PI/180));  // Couple gyro readings.
-  Gyro_Angle[1] += Gyro_Angle[0] * sin(Gyro_Angle[2]*(M_PI/180));
+  Gyro_Angle[1] += Gyro_Angle[0] * sin(Gyro_Angle[2]*(M_PI/180));  // Sin function uses radians
   
   // Combine Sensors Data:
-  Total_Angle[0] = 0.98*(Total_Angle[0] + Gyro_Angle[0]) + 0.02*(Accel_Angle[0]);
-  Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]) + 0.02*(Accel_Angle[1]);
-  Total_Angle[2] = Gyro_Angle[2];
-
+  Total_Angle[0] = 0.98*(Total_Angle[0] + Gyro_Angle[0]*0.004) + 0.02*(Accel_Angle[0]); // Integrate gyro output and pass through complementary filter.
+  Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]*0.004) + 0.02*(Accel_Angle[1]);
+  Total_Angle[2] = Total_Angle[2] + Gyro_Angle[2]*0.004;
+  
   // Scale Receiver Outputs For Faster Roll, Pitch & Yaw Rates
   Roll_Setpoint = 0; 
   if(receiver_input_1 > 1508) Roll_Setpoint = (receiver_input_1 - 1508)/3.0; // 3.0 Controls roll rate --> Joop Broking YMFC Video
@@ -161,6 +178,7 @@ void loop() {
   
   throttle = receiver_input_3;
   if(throttle > 1800) throttle = 1800; // Set a limit for maximum throttle so controllers can maintain safe operation. 
+  if(throttle < 1000) throttle = 1000;
   
   esc_1 = throttle + PID_ROLL - PID_YAW - PID_PITCH; // Addition/Subtraction neccessary to maintain balance of torque.
   esc_2 = throttle + PID_ROLL + PID_YAW + PID_PITCH;
@@ -184,12 +202,12 @@ void loop() {
   if(esc_4 < 1000) esc_4 = 1200;
   if(esc_4 > 2000) esc_4 = 2000;
 
-  //M1.writeMicroseconds(esc_1);
-  //M2.writeMicroseconds(esc_2);
-  //M3.writeMicroseconds(esc_3);
-  //M4.writeMicroseconds(esc_4);
-   
-  //if((micros() - Loop_Timer_Start) > 4050)Serial.println("Over 4ms!");
+  M1.writeMicroseconds(esc_1);
+  M2.writeMicroseconds(esc_2);
+  M3.writeMicroseconds(esc_3);
+  M4.writeMicroseconds(esc_4);
+  
+  //if((millis() - Loop_Timer_Start) > 10)Serial.println("Over 4ms!");
 } // End of Void Loop  
 
 void initTransmitter() {
@@ -284,4 +302,30 @@ void Compute_PID(){
   else if(PID_YAW < max_PID_yaw*-1) PID_YAW = max_PID_yaw*-1;
   PID_Previous_Yaw_Error = Yaw_Error;
   
+}
+
+void Read_IMU(){
+  Wire.beginTransmission(MPU_Address);
+  Wire.write(0x3B); // Move pointer to the first output register of the IMU device.
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_Address, 6, true);
+  AccelX_Raw =  Wire.read()<<8 | Wire.read(); // Read & combine register values using bit-shifting. Bit-shifting allows the fist bit to be set as high and the second bit to be set as low.  
+  AccelY_Raw =  Wire.read()<<8 | Wire.read();
+  AccelZ_Raw =  Wire.read()<<8 | Wire.read(); //Division by 16384 to convert reading to g.
+
+  Wire.beginTransmission(MPU_Address);
+  Wire.write(0x43);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_Address, 6, true);
+  GyroX_Raw = Wire.read()<<8 | Wire.read();
+  GyroY_Raw = Wire.read()<<8 | Wire.read();
+  GyroZ_Raw = Wire.read()<<8 | Wire.read();
+
+  if(Calibration_Complete == true){
+    AccelX_Raw -= Accel_X_Offset;
+    AccelY_Raw -= Accel_Y_Offset;
+    GyroX_Raw -= Gyro_X_Offset;
+    GyroY_Raw -= Gyro_Y_Offset;
+    GyroZ_Raw -= Gyro_Z_Offset;
+  }
 }
