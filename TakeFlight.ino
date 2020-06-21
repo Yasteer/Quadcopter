@@ -110,19 +110,21 @@ void setup() {
     M2.writeMicroseconds(2000);
     M3.writeMicroseconds(2000);
     M4.writeMicroseconds(2000);
-    delayMicroseconds(15000);
+    delayMicroseconds(10000);
     
     M1.writeMicroseconds(1000);
     M2.writeMicroseconds(1000);
     M3.writeMicroseconds(1000);
     M4.writeMicroseconds(1000);
-    delayMicroseconds(15000); 
+    delayMicroseconds(10000); 
 
     lcd.begin(16,2);
     lcd.clear();
     lcd.print("Setup Complete.");
-    delay(3000);
+    delay(2000);
     lcd.setBacklight(LOW);
+    Start = true;
+    Stop = false;
 }
 
 void loop() {
@@ -160,19 +162,19 @@ void loop() {
   Total_Angle[0] = 0.98*(Total_Angle[0] + Gyro_Angle[0]*0.004) + 0.02*(Accel_Angle[0]); // Integrate gyro output and pass through complementary filter.
   Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]*0.004) + 0.02*(Accel_Angle[1]);
   Total_Angle[2] = Total_Angle[2] + Gyro_Angle[2]*0.004;
-  
+
   // Scale Receiver Outputs For Faster Roll, Pitch & Yaw Rates
-  Roll_Setpoint = 0; 
-  if(receiver_input_1 > 1508) Roll_Setpoint = (receiver_input_1 - 1508)/3.0; // 3.0 Controls roll rate --> Joop Broking YMFC Video
-  else if(receiver_input_1 < 1492) Roll_Setpoint = (receiver_input_1 - 1492)/3.0; // Gap between 1492 & 1508 creates a deadband to prevent noise affecting calculation.
-
-  Pitch_Setpoint = 0;
-  if(receiver_input_2 > 1508) Pitch_Setpoint = (receiver_input_2 - 1508)/3.0;
-  else if(receiver_input_2 < 1492) Pitch_Setpoint = (receiver_input_2 - 1492)/3.0;
-
-  Yaw_Setpoint = 0;
-  if(receiver_input_4 > 1508) Yaw_Setpoint = (receiver_input_4 - 1508)/3.0;
-  else if(receiver_input_4 < 1492) Yaw_Setpoint = (receiver_input_4 - 1492)/3.0;
+  Roll_Setpoint = 0.0; 
+  if(receiver_input_1 > 1498) Roll_Setpoint = (receiver_input_1 - 1498)/3.0; // 3.0 Controls roll rate --> Joop Broking YMFC Video
+  else if(receiver_input_1 < 1482) Roll_Setpoint = (receiver_input_1 - 1482)/3.0; // Gap between 1492 & 1508 creates a deadband to prevent noise affecting calculation.
+  
+  Pitch_Setpoint = 0.0;
+  if(receiver_input_2 > 1498) Pitch_Setpoint = (receiver_input_2 - 1498)/3.0;
+  else if(receiver_input_2 < 1482) Pitch_Setpoint = (receiver_input_2 - 1482)/3.0;
+  
+  Yaw_Setpoint = 0.0;
+  if(receiver_input_4 > 1492) Yaw_Setpoint = (receiver_input_4 - 1492)/3.0;
+  else if(receiver_input_4 < 1476) Yaw_Setpoint = (receiver_input_4 - 1476)/3.0;
   
   Compute_PID(); // Function Call.
   
@@ -202,10 +204,21 @@ void loop() {
   if(esc_4 < 1000) esc_4 = 1200;
   if(esc_4 > 2000) esc_4 = 2000;
 
-  M1.writeMicroseconds(esc_1);
-  M2.writeMicroseconds(esc_2);
-  M3.writeMicroseconds(esc_3);
-  M4.writeMicroseconds(esc_4);
+  if(Start == true){
+    M1.writeMicroseconds(esc_1);
+    M2.writeMicroseconds(esc_2);
+    M3.writeMicroseconds(esc_3);
+    M4.writeMicroseconds(esc_4);
+  }
+
+  if((throttle < 1200) && (receiver_input_4 >= 1800)){ // If LHS gimbal is in bottom right position, stop drone. 
+    Start = false;
+    Stop = true;
+    M1.writeMicroseconds(990);
+    M2.writeMicroseconds(990);
+    M3.writeMicroseconds(990);
+    M4.writeMicroseconds(990);
+  }
   
   //if((millis() - Loop_Timer_Start) > 10)Serial.println("Over 4ms!");
 } // End of Void Loop  
@@ -265,7 +278,6 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
 } // Reading receiver signals takes a long time so we don't want it to slow the reffresh rate of the controller. Hence the need for an ISR. 
 
 void Compute_PID(){
-  
   // Roll
   Roll_Error = Total_Angle[0] - Roll_Setpoint;
   Roll_P = Roll_Kp * Roll_Error;
