@@ -11,6 +11,7 @@
 #include <Wire.h>
 #include <Math.h>
 #include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 
 //float rad_to_deg = 180/3.141592654;
 
@@ -34,8 +35,9 @@ bool Start;
 // Tx & Rx Variables
 byte last_val1, last_val2, last_val3, last_val4;
 unsigned long timeA, timeB, timeC, timeD, timeE, timeF, timeG, timeH, Current_Time;
-volatile int receiver_input_1, receiver_input_2, receiver_input_3, receiver_input_4; // Volatile keyword tells controller to store value in RAM and not in a register. Typically used in ISRs. 
-int throttle;
+volatile int receiver_input[4]; // Volatile keyword tells controller to store value in RAM and not in a register. Typically used in ISRs. 
+int throttle, Low_Setpoint, Midpoint, High_Setpoint;
+int Standardized_Receiver_Input[4];
 
 // Gyro & Accel Variables
 const int MPU_Address = 0x68;
@@ -72,6 +74,10 @@ void setup() {
     Serial.begin(9600);
     Wire.begin();                                                             //Start the I2C as master.
     TWBR = 12;                                                                //Set the I2C clock speed to 400kHz.
+
+    Low_Setpoint = EEPROM.read(9) << 8 | EEPROM.read(8);                      // Load in transmitter limits from EEPROM storage.
+    Midpoint = EEPROM.read(1) << 8 | EEPROM.read(0);
+    High_Setpoint = EEPROM.read(11) << 8 | EEPROM.read(10);
     
     initTransmitter();
     initMotors();
@@ -168,22 +174,27 @@ void loop() {
   Total_Angle[1] = 0.98*(Total_Angle[1] + Gyro_Angle[1]*0.004) + 0.02*(Accel_Angle[1]);
   Total_Angle[2] = Total_Angle[2] + Gyro_Angle[2]*0.004;
 
+  Standardized_Receiver_Input[0] = Standardize_Transmitter_Signal(0);
+  Standardized_Receiver_Input[1] = Standardize_Transmitter_Signal(1);
+  Standardized_Receiver_Input[2] = Standardize_Transmitter_Signal(2);
+  Standardized_Receiver_Input[3] = Standardize_Transmitter_Signal(3);
+
   // Scale Receiver Outputs For Faster Roll, Pitch & Yaw Rates
   Roll_Setpoint = 0.0; 
-  if(receiver_input_1 > 1498) Roll_Setpoint = (receiver_input_1 - 1498)/3.0; // 3.0 Controls roll rate --> Joop Broking YMFC Video
-  else if(receiver_input_1 < 1482) Roll_Setpoint = (receiver_input_1 - 1482)/3.0; // Gap between 1492 & 1508 creates a deadband to prevent noise affecting calculation.
+  if(Standardized_Receiver_Input[0] > 1508) Roll_Setpoint = (Standardized_Receiver_Input[0] - 1508)/3.0; // 3.0 Controls roll rate --> Joop Broking YMFC Video
+  else if(Standardized_Receiver_Input[0] < 1492) Roll_Setpoint = (Standardized_Receiver_Input[0] - 1492)/3.0; // Gap between 1492 & 1508 creates a deadband to prevent noise affecting calculation.
   
   Pitch_Setpoint = 0.0;
-  if(receiver_input_2 > 1498) Pitch_Setpoint = (receiver_input_2 - 1498)/3.0;
-  else if(receiver_input_2 < 1482) Pitch_Setpoint = (receiver_input_2 - 1482)/3.0;
+  if(Standardized_Receiver_Input[1] > 1508) Pitch_Setpoint = (Standardized_Receiver_Input[1] - 1508)/3.0;
+  else if(Standardized_Receiver_Input[1] < 1492) Pitch_Setpoint = (Standardized_Receiver_Input[1] - 1492)/3.0;
   
   Yaw_Setpoint = 0.0;
-  if(receiver_input_4 > 1492) Yaw_Setpoint = (receiver_input_4 - 1492)/3.0;
-  else if(receiver_input_4 < 1476) Yaw_Setpoint = (receiver_input_4 - 1476)/3.0;
-
+  if(Standardized_Receiver_Input[3] > 1508) Yaw_Setpoint = (Standardized_Receiver_Input[3] - 1508)/3.0;
+  else if(Standardized_Receiver_Input[3] < 1492) Yaw_Setpoint = (Standardized_Receiver_Input[3] - 1492)/3.0;
+  
   Compute_PID(); // PID should not be computing when drone is off. 
   
-  throttle = receiver_input_3;
+  throttle = Standardized_Receiver_Input[2];
   if(throttle > 1800) throttle = 1800; // Set a limit for maximum throttle so controllers can maintain safe operation. 
   if(throttle < 1000) throttle = 1000;
   
@@ -224,14 +235,13 @@ void loop() {
   M3.writeMicroseconds(esc_3);
   M4.writeMicroseconds(esc_4);
 
-  if((throttle < 1200) && (receiver_input_4 >= 1800)){ // If LHS gimbal is in bottom right position, stop drone. 
+  if((throttle < 1200) && (receiver_input[3] >= 1800)){ // If LHS gimbal is in bottom right position, stop drone. 
     Start = false;
   }
-  else if((throttle < 1200) && (receiver_input_4 <= 1100)){ // If LHS gimbal is bottom left position, start drone.
+  else if((throttle < 1200) && (receiver_input[3] <= 1100)){ // If LHS gimbal is bottom left position, start drone.
     Start = true;
   }
   //if((millis() - Loop_Timer_Start) > 10)Serial.println("Over 4ms!");
-  Serial.println(esc_2);
 } // End of Void Loop  
 
 void initTransmitter() {
@@ -257,7 +267,7 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
   }
   else if((last_val1 == 1) && !(PINB & B00000001)) { // Check if value changes from high to low. PINB & B00000001 is the same as digitalRead() but is faster --> Joop Brokking
     last_val1 = 0;
-    receiver_input_1 = micros() - timeA; // Horizontal direction on RHS Gamble.
+    receiver_input[0] = micros() - timeA; // Horizontal direction on RHS Gamble.
   }
   // Channel 2
   if((last_val2 == 0) && (PINB & B00000010)) { // && is logical AND while & is bitwise &. The second bracket checks channel 1 on Port B for input. 
@@ -266,7 +276,7 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
   }
   else if((last_val2 == 1) && !(PINB & B00000010)) { // Check if value changes from high to low. PINB & B00000001 is the same as digitalRead() but is faster --> Joop Brokking
     last_val2 = 0;
-    receiver_input_2 = micros() - timeC; // Vertical direction in RHS Gamble.
+    receiver_input[1] = micros() - timeC; // Vertical direction in RHS Gamble.
   }
   // Channel 3
   if((last_val3 == 0) && (PINB & B00000100)) { // && is logical AND while & is bitwise &. The second bracket checks channel 1 on Port B for input. 
@@ -275,7 +285,7 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
   }
   else if((last_val3 == 1) && !(PINB & B00000100)) { // Check if value changes from high to low. PINB & B00000001 is the same as digitalRead() but is faster --> Joop Brokking
     last_val3 = 0;
-    receiver_input_3 = micros() - timeE; // Vertical direction in LHS Gamble.
+    receiver_input[2] = micros() - timeE; // Vertical direction in LHS Gamble.
   }
   // Channel 4
   if((last_val4 == 0) && (PINB & B00001000)) { // && is logical AND while & is bitwise &. The second bracket checks channel 1 on Port B for input. 
@@ -284,7 +294,7 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
   }
   else if((last_val4 == 1) && !(PINB & B00001000)) { // Check if value changes from high to low. PINB & B00000001 is the same as digitalRead() but is faster --> Joop Brokking
     last_val4 = 0;
-    receiver_input_4 = micros() - timeG; // Horizontal direction in LHS Gamble. 
+    receiver_input[3] = micros() - timeG; // Horizontal direction in LHS Gamble. 
   }
 } // Reading receiver signals takes a long time so we don't want it to slow the reffresh rate of the controller. Hence the need for an ISR. 
 
@@ -366,4 +376,35 @@ void Read_IMU(){
     GyroY_Raw -= Gyro_Y_Offset;
     GyroZ_Raw -= Gyro_Z_Offset;
   }
+}
+
+
+// Standardization is required because there are some areas where the ecs don't detect transmitter values. 
+int Standardize_Transmitter_Signal(int Channel){
+  int difference = 0;
+  int Normalised_Value = 0;
+  int Receiver_Value;
+
+  Receiver_Value = receiver_input[Channel];
+
+  // Bind receiver input to EEPROM data.
+  if(Receiver_Value < Low_Setpoint){
+    Receiver_Value = Low_Setpoint;
+  }
+  if(Receiver_Value > High_Setpoint){
+    Receiver_Value = High_Setpoint;
+  }
+   
+  if(Receiver_Value < Midpoint){
+    difference = Midpoint - Receiver_Value;
+    Normalised_Value = 1500 - difference;
+    return Normalised_Value;
+  }
+  if(Receiver_Value > Midpoint){
+    difference = Receiver_Value - Midpoint;
+    Normalised_Value = 1500 + difference;
+    return Normalised_Value;
+  }
+  else
+    return 1500; // Set midpoint to desired esc midpoint. 
 }
