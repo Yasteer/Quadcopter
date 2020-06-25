@@ -18,7 +18,7 @@
 LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE); 
 
 int analogPin = 0;
-float ADC_Voltage; // ADC allows for a maximum of 5V to be read as a 10 Bit number. 
+float ADC_Voltage = 0; // ADC allows for a maximum of 5V to be read as a 10 Bit number. 
 float Calculated_Voltage = 0;
 float Vin = 0;
 float Lowest_Voltage = 3*3.5; // 3s battery, lowest voltage per cell is 3.5
@@ -29,7 +29,7 @@ float Diode_Volt_Drop = 0.70;
 float time, timePrev, Elapsed_Time;
 Servo M1,M2,M3,M4;
 int esc_1, esc_2, esc_3, esc_4;
-bool Start, Stop;
+bool Start;
 
 // Tx & Rx Variables
 byte last_val1, last_val2, last_val3, last_val4;
@@ -95,6 +95,8 @@ void setup() {
       Gyro_X_Offset  += GyroX_Raw;
       Gyro_Y_Offset  += GyroY_Raw;
       Gyro_Z_Offset  += GyroZ_Raw;
+
+      ADC_Voltage += analogRead(analogPin);
     }
     Accel_X_Offset /= 2000;
     Accel_Y_Offset /= 2000;
@@ -102,15 +104,19 @@ void setup() {
     Gyro_X_Offset  /= 2000;
     Gyro_Y_Offset  /= 2000;
     Gyro_Z_Offset  /= 2000;
+
+    ADC_Voltage /= 2000; 
+    Calculated_Voltage = (ADC_Voltage * 0.0049) + (Diode_Volt_Drop) - 0.25; // 1 unit in ADC = 0.0049 V
+    Vin = Calculated_Voltage*((1000+2000)/1000); // Solve voltage divider equation with resistor values used in the circuit. 
     Calibration_Complete = true;
         
     time = millis(); // Start the timer.
     
-    M1.writeMicroseconds(2000);
-    M2.writeMicroseconds(2000);
-    M3.writeMicroseconds(2000);
-    M4.writeMicroseconds(2000);
-    delayMicroseconds(10000);
+   // M1.writeMicroseconds(2000);
+   // M2.writeMicroseconds(2000);
+   // M3.writeMicroseconds(2000);
+   // M4.writeMicroseconds(2000);
+   // delayMicroseconds(10000);
     
     M1.writeMicroseconds(1000);
     M2.writeMicroseconds(1000);
@@ -123,8 +129,7 @@ void setup() {
     lcd.print("Setup Complete.");
     delay(2000);
     lcd.setBacklight(LOW);
-    Start = true;
-    Stop = false;
+    Start= false;
 }
 
 void loop() {
@@ -175,8 +180,8 @@ void loop() {
   Yaw_Setpoint = 0.0;
   if(receiver_input_4 > 1492) Yaw_Setpoint = (receiver_input_4 - 1492)/3.0;
   else if(receiver_input_4 < 1476) Yaw_Setpoint = (receiver_input_4 - 1476)/3.0;
-  
-  Compute_PID(); // Function Call.
+
+  Compute_PID(); // PID should not be computing when drone is off. 
   
   throttle = receiver_input_3;
   if(throttle > 1800) throttle = 1800; // Set a limit for maximum throttle so controllers can maintain safe operation. 
@@ -184,43 +189,49 @@ void loop() {
   
   esc_1 = throttle + PID_ROLL - PID_YAW - PID_PITCH; // Addition/Subtraction neccessary to maintain balance of torque.
   esc_2 = throttle + PID_ROLL + PID_YAW + PID_PITCH;
-  esc_3 = throttle - PID_ROLL + PID_YAW - PID_PITCH;
-  esc_4 = throttle - PID_ROLL - PID_YAW + PID_PITCH;
+  esc_3 = throttle - PID_ROLL - PID_YAW + PID_PITCH;
+  esc_4 = throttle - PID_ROLL + PID_YAW - PID_PITCH;
 
-  esc_1 += esc_1*(Nominal_Voltage - Vin)/10; // Compensate motors for reducing battery voltage.
-  esc_2 += esc_2*(Nominal_Voltage - Vin)/10;
-  esc_3 += esc_3*(Nominal_Voltage - Vin)/10;
-  esc_4 += esc_4*(Nominal_Voltage - Vin)/10;
-
-  if(esc_1 < 1000) esc_1 = 1200; // Lower limit set to prevent motors from turning off
+  if((Vin < 11.5) && (Vin > 9.0)){
+    esc_1 += (esc_1*(Nominal_Voltage - Vin))/(float)10; // Compensate motors for reducing battery voltage if the battery is connected.
+    esc_2 += (esc_2*(Nominal_Voltage - Vin))/(float)10;
+    esc_3 += (esc_3*(Nominal_Voltage - Vin))/(float)10;
+    esc_4 += (esc_4*(Nominal_Voltage - Vin))/(float)10;
+  }
+  
+  if(esc_1 < 1000) esc_1 = 1100; // Lower limit set to prevent motors from turning off
   if(esc_1 > 2000) esc_1 = 2000;
   
-  if(esc_2 < 1000) esc_2 = 1200;
+  if(esc_2 < 1000) esc_2 = 1100;
   if(esc_2 > 2000) esc_2 = 2000;
   
-  if(esc_3 < 1000) esc_3 = 1200;
+  if(esc_3 < 1000) esc_3 = 1100;
   if(esc_3 > 2000) esc_3 = 2000;
   
-  if(esc_4 < 1000) esc_4 = 1200;
+  if(esc_4 < 1000) esc_4 = 1100;
   if(esc_4 > 2000) esc_4 = 2000;
 
-  if(Start == true){
-    M1.writeMicroseconds(esc_1);
-    M2.writeMicroseconds(esc_2);
-    M3.writeMicroseconds(esc_3);
-    M4.writeMicroseconds(esc_4);
+  if(Start == false){
+    // Set ESCs to an OFF value so that the device can be handled safely.
+    esc_1 = 990;
+    esc_2 = 990;
+    esc_3 = 990;
+    esc_4 = 990;
   }
+
+  M1.writeMicroseconds(esc_1);
+  M2.writeMicroseconds(esc_2);
+  M3.writeMicroseconds(esc_3);
+  M4.writeMicroseconds(esc_4);
 
   if((throttle < 1200) && (receiver_input_4 >= 1800)){ // If LHS gimbal is in bottom right position, stop drone. 
     Start = false;
-    Stop = true;
-    M1.writeMicroseconds(990);
-    M2.writeMicroseconds(990);
-    M3.writeMicroseconds(990);
-    M4.writeMicroseconds(990);
   }
-  
+  else if((throttle < 1200) && (receiver_input_4 <= 1100)){ // If LHS gimbal is bottom left position, start drone.
+    Start = true;
+  }
   //if((millis() - Loop_Timer_Start) > 10)Serial.println("Over 4ms!");
+  Serial.println(esc_2);
 } // End of Void Loop  
 
 void initTransmitter() {
@@ -232,10 +243,10 @@ void initTransmitter() {
 }
 
 void initMotors() {
-  M1.attach(4, 1000, 2000);
-  M2.attach(5, 1000, 2000);
-  M3.attach(6, 1000, 2000);
-  M4.attach(7, 1000, 2000);
+  M1.attach(4, 1000, 2000); // 
+  M2.attach(5, 1000, 2000); // 
+  M3.attach(7, 1000, 2000); // 
+  M4.attach(6, 1000, 2000); // 
 }
 
 ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can then be used to control the ESC's. 
@@ -279,12 +290,17 @@ ISR (PCINT0_vect) { // ISR must determine time of each square wave. This can the
 
 void Compute_PID(){
   // Roll
-  Roll_Error = Total_Angle[0] - Roll_Setpoint;
+  Roll_Error = Total_Angle[0] - Roll_Setpoint; // Error = Gyro - Receiver
   Roll_P = Roll_Kp * Roll_Error;
   Roll_I += Roll_Ki * Roll_Error;
   if(Roll_I > max_PID_roll) Roll_I = max_PID_roll;
   else if(Roll_I < max_PID_roll*-1) Roll_I = max_PID_roll*-1;
   Roll_D = Roll_Kd * (Roll_Error - PID_Previous_Roll_Error);
+  if (Start == false){
+    Roll_P = 0;
+    Roll_I = 0;
+    Roll_D = 0;
+  }
   PID_ROLL = (Roll_P) + (Roll_I) + (Roll_D); 
   if(PID_ROLL > max_PID_roll) PID_ROLL = max_PID_roll;
   else if(PID_ROLL < max_PID_roll*-1) PID_ROLL = max_PID_roll*-1;
@@ -297,6 +313,11 @@ void Compute_PID(){
   if(Pitch_I > max_PID_pitch) Pitch_I = max_PID_pitch;
   else if(Pitch_I < max_PID_pitch*-1) Pitch_I = max_PID_pitch*-1;
   Pitch_D = Pitch_Kd * (Pitch_Error - PID_Previous_Pitch_Error);
+  if (Start == false){
+    Pitch_P = 0;
+    Pitch_I = 0;
+    Pitch_D = 0;
+  }
   PID_PITCH = (Pitch_P) + (Pitch_I) + (Pitch_D); 
   if(PID_PITCH > max_PID_pitch) PID_PITCH = max_PID_pitch;
   else if(PID_PITCH < max_PID_pitch*-1) PID_PITCH = max_PID_pitch*-1;
@@ -309,6 +330,11 @@ void Compute_PID(){
   if(Yaw_I > max_PID_yaw) Yaw_I = max_PID_yaw;
   else if(Yaw_I < max_PID_yaw*-1) Yaw_I = max_PID_yaw*-1;
   Yaw_D = Yaw_Kd * (Yaw_Error - PID_Previous_Yaw_Error);
+  if (Start == false){
+    Yaw_P = 0;
+    Yaw_I = 0;
+    Yaw_D = 0;
+  }
   PID_YAW = (Yaw_P) + (Yaw_I) + (Yaw_D); 
   if(PID_YAW > max_PID_yaw) PID_YAW = max_PID_yaw;
   else if(PID_YAW < max_PID_yaw*-1) PID_YAW = max_PID_yaw*-1;
